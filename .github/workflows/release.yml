@@ -63,7 +63,12 @@ jobs:
 
       - name: Build AppImage (linux-x86_64)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
+          sudo apt-get install -y libfuse2
+          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O /usr/local/bin/appimagetool
+          chmod +x /usr/local/bin/appimagetool
           cargo install cargo-appimage
           cargo appimage
           mv target/appimage/rustic-vault.AppImage ${{ matrix.artifact }}.AppImage
