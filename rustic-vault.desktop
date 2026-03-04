@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Rustic Vault
+Exec=rustic-vault
+Icon=rustic-vault
+Type=Application
+Categories=Utility;Archiving;
+Comment=Encrypted backup GUI powered by rustic_core

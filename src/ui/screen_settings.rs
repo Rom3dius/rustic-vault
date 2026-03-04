@@ -19,20 +19,35 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .spacing(12)
     .padding(24);
 
+    // Current repo name header
+    let repo_name = app
+        .config
+        .current_repo_config()
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    let save_password = app
+        .config
+        .current_repo_config()
+        .map(|r| r.save_password)
+        .unwrap_or(false);
+
     // Password section
-    let save_label = if app.config.save_password {
+    let save_label = if save_password {
         "[x] Save password to disk"
     } else {
         "[ ] Save password to disk"
     };
 
+    let current_pw = app.current_password();
     let password_display = if app.password_visible {
-        app.password.clone()
+        current_pw
     } else {
         "••••••••••••".to_string()
     };
 
     let password_section = column![
+        text(format!("Repository: {repo_name}")).size(14).color([0.6, 0.6, 0.6]),
         row![
             text(format!("Password: {password_display}")).size(14),
             button(
@@ -49,7 +64,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .spacing(8)
         .align_y(iced::Alignment::Center),
         button(text(save_label).size(14))
-            .on_press(Message::SettingsToggleSavePassword(!app.config.save_password))
+            .on_press(Message::SettingsToggleSavePassword(!save_password))
             .style(button::text),
         text(help::SAVE_PASSWORD).size(12).color([0.5, 0.5, 0.5]),
         rule::horizontal(1),
@@ -84,6 +99,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // Repository info section
     let repo_path = app.repo_path();
     let mut repo_info_col = column![
+        text(format!("Name: {repo_name}")).size(13),
         text(format!("Path: {}", repo_path.display())).size(13),
     ]
     .spacing(4);

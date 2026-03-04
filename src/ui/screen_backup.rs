@@ -13,11 +13,40 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .map(|p| p.name.as_str())
             .unwrap_or("Unknown");
 
+        let (fraction, phase, total, current) =
+            if let Some(ref progress) = app.backup_progress {
+                (
+                    progress.fraction(),
+                    progress.phase_text(),
+                    progress.total(),
+                    progress.current(),
+                )
+            } else {
+                (0.0, "Starting...".to_string(), 0u64, 0u64)
+            };
+
         content = content
             .push(text(format!("Creating snapshot for '{profile_name}'...")).size(22))
-            .push(text("Backup in progress. This may take a while depending on the amount of data.").size(14).color([0.6, 0.6, 0.6]))
-            .push(progress_bar(0.0..=1.0, 0.5))
-            .push(text("Processing files...").size(13).color([0.5, 0.5, 0.5]));
+            .push(text(phase).size(14).color([0.6, 0.6, 0.6]))
+            .push(progress_bar(0.0..=1.0, fraction));
+
+        if total > 0 {
+            let pct = (fraction * 100.0) as u32;
+            content = content.push(
+                text(format!(
+                    "{} / {}  ({}%)",
+                    bytesize::ByteSize(current),
+                    bytesize::ByteSize(total),
+                    pct,
+                ))
+                .size(13)
+                .color([0.5, 0.5, 0.5]),
+            );
+        } else {
+            content = content.push(
+                text("Preparing...").size(13).color([0.5, 0.5, 0.5]),
+            );
+        }
     } else if let Some(ref summary) = app.backup_summary {
         content = content
             .push(text("Backup Complete!").size(22))

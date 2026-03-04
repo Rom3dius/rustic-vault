@@ -1,4 +1,6 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use rustic_backend::BackendOptions;
 use rustic_core::{
@@ -8,6 +10,114 @@ use rustic_core::{
 };
 
 use crate::core::profile::RetentionPolicy;
+
+// ── Progress tracking ────────────────────────────────────────────────────────
+
+/// Shared progress state between the backup thread and the UI.
+#[derive(Debug)]
+pub struct BackupProgressState {
+    total: AtomicU64,
+    current: AtomicU64,
+    phase: Mutex<String>,
+}
+
+impl BackupProgressState {
+    pub fn new() -> Self {
+        Self {
+            total: AtomicU64::new(0),
+            current: AtomicU64::new(0),
+            phase: Mutex::new("Starting...".into()),
+        }
+    }
+
+    pub fn fraction(&self) -> f32 {
+        let total = self.total.load(Ordering::Relaxed);
+        let current = self.current.load(Ordering::Relaxed);
+        if total == 0 {
+            0.0
+        } else {
+            (current as f32 / total as f32).min(1.0)
+        }
+    }
+
+    pub fn total(&self) -> u64 {
+        self.total.load(Ordering::Relaxed)
+    }
+
+    pub fn current(&self) -> u64 {
+        self.current.load(Ordering::Relaxed)
+    }
+
+    pub fn phase_text(&self) -> String {
+        self.phase.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+/// A `RusticProgress` implementation that writes to shared atomics.
+#[derive(Debug)]
+struct AppProgress {
+    state: Arc<BackupProgressState>,
+    tracks_progress: bool,
+}
+
+impl rustic_core::RusticProgress for AppProgress {
+    fn is_hidden(&self) -> bool {
+        false
+    }
+
+    fn set_length(&self, len: u64) {
+        if self.tracks_progress {
+            self.state.total.store(len, Ordering::Relaxed);
+        }
+    }
+
+    fn set_title(&self, title: &str) {
+        if let Ok(mut p) = self.state.phase.lock() {
+            *p = title.to_string();
+        }
+    }
+
+    fn inc(&self, inc: u64) {
+        if self.tracks_progress {
+            self.state.current.fetch_add(inc, Ordering::Relaxed);
+        }
+    }
+
+    fn finish(&self) {}
+}
+
+/// A `ProgressBars` implementation that creates `AppProgress` instances.
+#[derive(Debug)]
+struct AppProgressBars {
+    state: Arc<BackupProgressState>,
+}
+
+impl rustic_core::ProgressBars for AppProgressBars {
+    fn progress(
+        &self,
+        progress_type: rustic_core::ProgressType,
+        prefix: &str,
+    ) -> rustic_core::Progress {
+        // Reset counters for each new tracked phase
+        let tracks = matches!(
+            progress_type,
+            rustic_core::ProgressType::Counter | rustic_core::ProgressType::Bytes
+        );
+        if tracks {
+            self.state.current.store(0, Ordering::Relaxed);
+            self.state.total.store(0, Ordering::Relaxed);
+        }
+        if let Ok(mut p) = self.state.phase.lock() {
+            *p = prefix.to_string();
+        }
+        rustic_core::Progress::new(AppProgress {
+            state: self.state.clone(),
+            tracks_progress: tracks,
+        })
+    }
+}
+
+// ── Data types ───────────────────────────────────────────────────────────────
 
 /// Summary of a completed backup.
 #[derive(Debug, Clone)]
@@ -65,6 +175,8 @@ pub struct RepoInfo {
     pub snapshot_count: usize,
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
 fn backends(repo_path: &Path) -> Result<rustic_core::RepositoryBackends, String> {
     BackendOptions::default()
         .repository(repo_path.to_string_lossy().as_ref())
@@ -75,6 +187,8 @@ fn backends(repo_path: &Path) -> Result<rustic_core::RepositoryBackends, String>
 fn repo_opts() -> RepositoryOptions {
     RepositoryOptions::default()
 }
+
+// ── Repository operations ────────────────────────────────────────────────────
 
 /// Initialize a new repository at the given path with the given password.
 pub fn init_repo(repo_path: &Path, password: &str) -> Result<(), String> {
@@ -104,17 +218,21 @@ pub fn repo_info(repo_path: &Path, password: &str) -> Result<RepoInfo, String> {
     })
 }
 
-/// Run a backup with the given sources, excludes, and tags.
-pub fn run_backup(
+/// Run a backup with progress reporting via shared atomics.
+pub fn run_backup_with_progress(
     repo_path: &Path,
     password: &str,
     sources: &[PathBuf],
     excludes: &[String],
     tags: &[String],
     hostname: Option<&str>,
+    progress: Arc<BackupProgressState>,
 ) -> Result<BackupSummary, String> {
     let be = backends(repo_path)?;
-    let repo = Repository::new(&repo_opts(), &be)
+    let pb = AppProgressBars {
+        state: progress,
+    };
+    let repo = Repository::new_with_progress(&repo_opts(), &be, pb)
         .map_err(|e| format!("Repository error: {e}"))?
         .open(&Credentials::password(password))
         .map_err(|e| format!("Open failed: {e}"))?

@@ -1,9 +1,13 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use iced::widget::{button, column, container, row, text};
-use iced::{Element, Length, Task, Theme};
+use iced::{Element, Length, Subscription, Task, Theme};
 
-use crate::core::config::AppConfig;
+use crate::core::repo::BackupProgressState;
+
+use crate::core::config::{AppConfig, RepoConfig};
 use crate::core::profile::Profile;
 use crate::core::repo::{BackupSummary, ForgetPruneSummary, RepoInfo, SnapshotInfo};
 use crate::ui::widgets::theme_from_name;
@@ -12,6 +16,7 @@ use crate::ui::widgets::theme_from_name;
 
 #[derive(Debug, Clone)]
 pub enum Screen {
+    RepoSelector,
     FirstRun,
     Home,
     ProfileEditor,
@@ -31,6 +36,16 @@ pub enum Message {
     GoSnapshots,
     GoProfileEditor(Option<usize>), // None = new, Some(idx) = edit existing
     GoBackup(usize),                // profile index
+    GoRepoSelector,
+
+    // Repo management
+    RepoSelected(String),
+    RepoAddNameChanged(String),
+    RepoAddPathChanged(String),
+    RepoAddBrowse,
+    RepoAddBrowseResult(Option<PathBuf>),
+    RepoAddConfirm,
+    RepoRemove(String),
 
     // First-run
     FirstRunPasswordChanged(String),
@@ -62,6 +77,7 @@ pub enum Message {
 
     // Backup
     BackupStarted,
+    BackupTick,
     BackupResult(Result<BackupSummary, String>),
 
     // Snapshots
@@ -91,6 +107,10 @@ pub enum Message {
     // Status
     StatusMessage(String),
     ClearStatus,
+
+    // Update check
+    UpdateCheckResult(Option<crate::core::update::UpdateInfo>),
+    DismissUpdate,
 }
 
 // ── App State ────────────────────────────────────────────────────────────────
@@ -102,9 +122,9 @@ pub struct App {
     pub profiles: Vec<Profile>,
     pub selected_profile: Option<usize>,
 
-    // Password management
-    pub password: String,
-    pub password_unlocked: bool,
+    // Per-repo password management
+    pub repo_passwords: HashMap<String, String>,
+    pub repo_unlocked: HashMap<String, bool>,
     pub password_visible: bool,
 
     // First-run state
@@ -112,6 +132,10 @@ pub struct App {
     pub first_run_custom_password: bool,
     pub first_run_save_password: bool,
     pub first_run_generated: String,
+
+    // Repo add form state
+    pub repo_add_name: String,
+    pub repo_add_path: String,
 
     // Profile editor state
     pub editor_profile: Option<Profile>,
@@ -124,6 +148,7 @@ pub struct App {
 
     // Backup state
     pub backup_running: bool,
+    pub backup_progress: Option<Arc<BackupProgressState>>,
     pub backup_summary: Option<BackupSummary>,
 
     // Snapshots state
@@ -138,40 +163,73 @@ pub struct App {
     // Status bar
     pub status: String,
     pub busy: bool,
+
+    // Update notification
+    pub update_info: Option<crate::core::update::UpdateInfo>,
 }
 
 impl App {
     pub fn new(base_path: PathBuf) -> (Self, Task<Message>) {
         let config = AppConfig::load(&base_path);
-        let profiles_dir = base_path.join("profiles");
-        let profiles = Profile::load_all(&profiles_dir);
-        let repo_path = config.resolve_repo_path(&base_path);
 
-        // Check if repo exists
-        let repo_exists = repo_path.join("config").exists();
-
-        // Try to load password from file
-        let (password, password_unlocked) =
-            if let Some(pw_path) = config.resolve_password_path(&base_path) {
+        // Load passwords for all repos
+        let mut repo_passwords = HashMap::new();
+        let mut repo_unlocked = HashMap::new();
+        for repo in &config.repos {
+            if let Some(pw_path) = repo.resolve_password_path(&base_path) {
                 if pw_path.exists() {
-                    match std::fs::read_to_string(&pw_path) {
-                        Ok(pw) => (pw.trim().to_string(), true),
-                        Err(_) => (String::new(), false),
+                    if let Ok(pw) = std::fs::read_to_string(&pw_path) {
+                        repo_passwords.insert(repo.id.clone(), pw.trim().to_string());
+                        repo_unlocked.insert(repo.id.clone(), true);
+                        continue;
                     }
-                } else {
-                    (String::new(), false)
                 }
-            } else {
-                (String::new(), false)
-            };
+            }
+            repo_passwords.insert(repo.id.clone(), String::new());
+            repo_unlocked.insert(repo.id.clone(), false);
+        }
 
-        let screen = if !repo_exists {
-            Screen::FirstRun
-        } else if !password_unlocked {
-            // Need password prompt - but we'll handle this as a special state
-            Screen::Home
+        // Migrate flat profiles into per-repo subdirectory
+        let flat_profiles_dir = base_path.join("profiles");
+        if config.repos.len() == 1 {
+            let repo = &config.repos[0];
+            let per_repo_dir = flat_profiles_dir.join(&repo.id);
+            // If per-repo dir doesn't exist but flat profiles do, migrate
+            if !per_repo_dir.exists() {
+                let flat_profiles = Profile::load_all(&flat_profiles_dir);
+                if !flat_profiles.is_empty() {
+                    let _ = std::fs::create_dir_all(&per_repo_dir);
+                    for p in &flat_profiles {
+                        let _ = p.save(&per_repo_dir);
+                        // Remove from flat dir
+                        let flat_file = flat_profiles_dir.join(format!("{}.json", p.id));
+                        let _ = std::fs::remove_file(&flat_file);
+                    }
+                }
+            }
+        }
+
+        // Load profiles for current repo
+        let profiles = if let Some(ref repo) = config.current_repo_config() {
+            let profiles_dir = flat_profiles_dir.join(&repo.id);
+            Profile::load_all(&profiles_dir)
         } else {
-            Screen::Home
+            Vec::new()
+        };
+
+        // Determine initial screen
+        let screen = if config.repos.is_empty() {
+            Screen::RepoSelector
+        } else if let Some(ref repo) = config.current_repo_config() {
+            let repo_path = repo.resolve_repo_path(&base_path);
+            let repo_exists = repo_path.join("config").exists();
+            if !repo_exists {
+                Screen::FirstRun
+            } else {
+                Screen::Home
+            }
+        } else {
+            Screen::RepoSelector
         };
 
         // Generate a random password for first-run
@@ -184,14 +242,17 @@ impl App {
             profiles,
             selected_profile: None,
 
-            password,
-            password_unlocked,
+            repo_passwords,
+            repo_unlocked,
             password_visible: false,
 
             first_run_password: generated.clone(),
             first_run_custom_password: false,
             first_run_save_password: true,
             first_run_generated: generated,
+
+            repo_add_name: String::new(),
+            repo_add_path: String::new(),
 
             editor_profile: None,
             editor_excludes_text: String::new(),
@@ -202,6 +263,7 @@ impl App {
             editor_keep_monthly: String::new(),
 
             backup_running: false,
+            backup_progress: None,
             backup_summary: None,
 
             snapshots: Vec::new(),
@@ -213,9 +275,37 @@ impl App {
 
             status: String::new(),
             busy: false,
+
+            update_info: None,
         };
 
-        (app, Task::none())
+        // Fire a background update check on startup
+        let startup_task = Task::perform(
+            crate::core::update::check_for_update(),
+            Message::UpdateCheckResult,
+        );
+
+        (app, startup_task)
+    }
+
+    /// Get the password for the current repo.
+    pub fn current_password(&self) -> String {
+        self.config
+            .current_repo
+            .as_ref()
+            .and_then(|id| self.repo_passwords.get(id))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Check if current repo is unlocked.
+    pub fn current_unlocked(&self) -> bool {
+        self.config
+            .current_repo
+            .as_ref()
+            .and_then(|id| self.repo_unlocked.get(id))
+            .copied()
+            .unwrap_or(false)
     }
 
     #[allow(dead_code)]
@@ -228,11 +318,26 @@ impl App {
     }
 
     pub fn profiles_dir(&self) -> PathBuf {
-        self.base_path.join("profiles")
+        if let Some(ref repo) = self.config.current_repo_config() {
+            self.base_path.join("profiles").join(&repo.id)
+        } else {
+            self.base_path.join("profiles")
+        }
     }
 
     pub fn repo_path(&self) -> PathBuf {
-        self.config.resolve_repo_path(&self.base_path)
+        if let Some(ref repo) = self.config.current_repo_config() {
+            repo.resolve_repo_path(&self.base_path)
+        } else {
+            self.base_path.join("repo")
+        }
+    }
+
+    /// Reload profiles for the current repo from disk.
+    fn reload_profiles(&mut self) {
+        let profiles_dir = self.profiles_dir();
+        self.profiles = Profile::load_all(&profiles_dir);
+        self.selected_profile = None;
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -249,7 +354,7 @@ impl App {
                 self.password_visible = false;
                 // Load repo info
                 let repo_path = self.repo_path();
-                let password = self.password.clone();
+                let password = self.current_password();
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
@@ -319,20 +424,25 @@ impl App {
                 self.backup_summary = None;
                 let profile = self.profiles[idx].clone();
                 let repo_path = self.repo_path();
-                let password = self.password.clone();
+                let password = self.current_password();
                 let hostname = hostname::get()
                     .ok()
                     .and_then(|h| h.into_string().ok());
+
+                let progress = Arc::new(BackupProgressState::new());
+                self.backup_progress = Some(progress.clone());
+
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
-                            crate::core::repo::run_backup(
+                            crate::core::repo::run_backup_with_progress(
                                 &repo_path,
                                 &password,
                                 &profile.paths,
                                 &profile.excludes,
                                 &profile.tags,
                                 hostname.as_deref(),
+                                progress,
                             )
                         })
                         .await
@@ -340,6 +450,104 @@ impl App {
                     },
                     Message::BackupResult,
                 )
+            }
+            Message::GoRepoSelector => {
+                self.screen = Screen::RepoSelector;
+                Task::none()
+            }
+
+            // ── Repo Management ─────────────────────────────────────────
+            Message::RepoSelected(id) => {
+                self.config.current_repo = Some(id.clone());
+                let _ = self.config.save(&self.base_path);
+                self.reload_profiles();
+
+                // Check if repo exists
+                let repo_path = self.repo_path();
+                let repo_exists = repo_path.join("config").exists();
+                if !repo_exists {
+                    self.first_run_generated = generate_password();
+                    self.first_run_password = self.first_run_generated.clone();
+                    self.first_run_custom_password = false;
+                    self.first_run_save_password = true;
+                    self.screen = Screen::FirstRun;
+                } else if !self.current_unlocked() {
+                    self.screen = Screen::Home; // will show password prompt
+                } else {
+                    self.screen = Screen::Home;
+                }
+                Task::none()
+            }
+            Message::RepoAddNameChanged(name) => {
+                self.repo_add_name = name;
+                Task::none()
+            }
+            Message::RepoAddPathChanged(path) => {
+                self.repo_add_path = path;
+                Task::none()
+            }
+            Message::RepoAddBrowse => {
+                Task::perform(
+                    async {
+                        let handle = rfd::AsyncFileDialog::new()
+                            .set_title("Select repository folder")
+                            .pick_folder()
+                            .await;
+                        handle.map(|h| h.path().to_path_buf())
+                    },
+                    Message::RepoAddBrowseResult,
+                )
+            }
+            Message::RepoAddBrowseResult(path) => {
+                if let Some(p) = path {
+                    self.repo_add_path = p.display().to_string();
+                }
+                Task::none()
+            }
+            Message::RepoAddConfirm => {
+                if self.repo_add_name.trim().is_empty() || self.repo_add_path.trim().is_empty() {
+                    self.status = "Please enter both a name and path.".into();
+                    return Task::none();
+                }
+                let repo = RepoConfig::new(
+                    self.repo_add_name.trim().to_string(),
+                    PathBuf::from(self.repo_add_path.trim()),
+                );
+                let repo_id = repo.id.clone();
+                self.config.add_repo(repo);
+                let _ = self.config.save(&self.base_path);
+                // Create profiles dir for new repo
+                let profiles_dir = self.base_path.join("profiles").join(&repo_id);
+                let _ = std::fs::create_dir_all(&profiles_dir);
+                // Init password maps
+                self.repo_passwords.insert(repo_id, String::new());
+                self.repo_unlocked.insert(
+                    self.config.current_repo.as_ref().unwrap().clone(),
+                    false,
+                );
+                self.repo_add_name.clear();
+                self.repo_add_path.clear();
+                self.reload_profiles();
+                // Navigate to first-run for the new repo
+                self.first_run_generated = generate_password();
+                self.first_run_password = self.first_run_generated.clone();
+                self.first_run_custom_password = false;
+                self.first_run_save_password = true;
+                self.screen = Screen::FirstRun;
+                Task::none()
+            }
+            Message::RepoRemove(id) => {
+                self.repo_passwords.remove(&id);
+                self.repo_unlocked.remove(&id);
+                self.config.remove_repo(&id);
+                let _ = self.config.save(&self.base_path);
+                if self.config.repos.is_empty() {
+                    self.profiles.clear();
+                    self.selected_profile = None;
+                } else {
+                    self.reload_profiles();
+                }
+                Task::none()
             }
 
             // ── First Run ────────────────────────────────────────────────
@@ -374,10 +582,15 @@ impl App {
                 let password = self.first_run_password.clone();
                 let save = self.first_run_save_password;
                 let base = self.base_path.clone();
+                let repo_id = self
+                    .config
+                    .current_repo
+                    .clone()
+                    .unwrap_or_default();
 
                 // Save password to file if requested
                 if save {
-                    let pw_path = base.join("../.password");
+                    let pw_path = base.join(format!(".password_{repo_id}"));
                     let _ = std::fs::write(&pw_path, &password);
                 }
 
@@ -396,15 +609,23 @@ impl App {
                 self.busy = false;
                 match result {
                     Ok(()) => {
-                        self.password = self.first_run_password.clone();
-                        self.password_unlocked = true;
-                        self.config.save_password = self.first_run_save_password;
-                        if self.first_run_save_password {
-                            self.config.password_file = Some(PathBuf::from("../.password"));
-                        } else {
-                            self.config.password_file = None;
+                        let repo_id = self.config.current_repo.clone().unwrap_or_default();
+                        let password = self.first_run_password.clone();
+                        self.repo_passwords.insert(repo_id.clone(), password);
+                        self.repo_unlocked.insert(repo_id.clone(), true);
+
+                        if let Some(repo) = self.config.current_repo_config_mut() {
+                            repo.save_password = self.first_run_save_password;
+                            if self.first_run_save_password {
+                                repo.password_file =
+                                    Some(PathBuf::from(format!(".password_{}", repo.id)));
+                            } else {
+                                repo.password_file = None;
+                            }
                         }
                         let _ = self.config.save(&self.base_path);
+                        // Ensure profiles dir exists
+                        let _ = std::fs::create_dir_all(self.profiles_dir());
                         self.screen = Screen::Home;
                         self.status = "Repository initialized successfully!".into();
                     }
@@ -570,8 +791,10 @@ impl App {
 
             // ── Backup ───────────────────────────────────────────────────
             Message::BackupStarted => Task::none(),
+            Message::BackupTick => Task::none(), // forces re-render to update progress bar
             Message::BackupResult(result) => {
                 self.backup_running = false;
+                self.backup_progress = None;
                 match result {
                     Ok(summary) => {
                         // Update last_backup on the profile
@@ -623,7 +846,7 @@ impl App {
                     self.busy = true;
                     self.status = "Restoring...".into();
                     let repo_path = self.repo_path();
-                    let password = self.password.clone();
+                    let password = self.current_password();
                     Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
@@ -655,7 +878,7 @@ impl App {
                 self.busy = true;
                 self.status = "Deleting snapshot...".into();
                 let repo_path = self.repo_path();
-                let password = self.password.clone();
+                let password = self.current_password();
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
@@ -689,7 +912,7 @@ impl App {
                 self.busy = true;
                 self.status = "Applying retention policy and pruning...".into();
                 let repo_path = self.repo_path();
-                let password = self.password.clone();
+                let password = self.current_password();
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
@@ -718,15 +941,26 @@ impl App {
 
             // ── Settings ─────────────────────────────────────────────────
             Message::SettingsToggleSavePassword(save) => {
-                self.config.save_password = save;
-                if save {
-                    self.config.password_file = Some(PathBuf::from("../.password"));
-                    let pw_path = self.base_path.join("../.password");
-                    let _ = std::fs::write(&pw_path, &self.password);
-                } else {
-                    self.config.password_file = None;
-                    let pw_path = self.base_path.join("../.password");
-                    let _ = std::fs::remove_file(&pw_path);
+                if let Some(repo) = self.config.current_repo_config_mut() {
+                    repo.save_password = save;
+                    let repo_id = repo.id.clone();
+                    if save {
+                        let pw_file = format!(".password_{repo_id}");
+                        repo.password_file = Some(PathBuf::from(&pw_file));
+                        let pw_path = self.base_path.join(&pw_file);
+                        let password = self.current_password();
+                        let _ = std::fs::write(&pw_path, &password);
+                    } else {
+                        if let Some(ref pw_file) = repo.password_file {
+                            let pw_path = if pw_file.is_absolute() {
+                                pw_file.clone()
+                            } else {
+                                self.base_path.join(pw_file)
+                            };
+                            let _ = std::fs::remove_file(&pw_path);
+                        }
+                        repo.password_file = None;
+                    }
                 }
                 let _ = self.config.save(&self.base_path);
                 Task::none()
@@ -741,12 +975,15 @@ impl App {
                 Task::none()
             }
             Message::SettingsChangePassword => {
-                // TODO: rustic_core key change not trivially exposed.
-                // For now, update the stored password file.
-                self.password = self.settings_new_password.clone();
-                if self.config.save_password {
-                    let pw_path = self.base_path.join("../.password");
-                    let _ = std::fs::write(&pw_path, &self.password);
+                let repo_id = self.config.current_repo.clone().unwrap_or_default();
+                self.repo_passwords
+                    .insert(repo_id.clone(), self.settings_new_password.clone());
+                if let Some(repo) = self.config.current_repo_config() {
+                    if repo.save_password {
+                        if let Some(pw_path) = repo.resolve_password_path(&self.base_path) {
+                            let _ = std::fs::write(&pw_path, &self.settings_new_password);
+                        }
+                    }
                 }
                 self.status = "Password updated (stored locally).".into();
                 self.settings_new_password.clear();
@@ -767,11 +1004,15 @@ impl App {
 
             // ── Password Prompt ──────────────────────────────────────────
             Message::PasswordPromptChanged(pw) => {
-                self.password = pw;
+                if let Some(ref repo_id) = self.config.current_repo {
+                    self.repo_passwords.insert(repo_id.clone(), pw);
+                }
                 Task::none()
             }
             Message::PasswordPromptSubmit => {
-                self.password_unlocked = true;
+                if let Some(ref repo_id) = self.config.current_repo {
+                    self.repo_unlocked.insert(repo_id.clone(), true);
+                }
                 Task::none()
             }
 
@@ -784,12 +1025,35 @@ impl App {
                 self.status.clear();
                 Task::none()
             }
+
+            // ── Update Check ─────────────────────────────────────────────
+            Message::UpdateCheckResult(info) => {
+                self.update_info = info;
+                Task::none()
+            }
+            Message::DismissUpdate => {
+                self.update_info = None;
+                Task::none()
+            }
+        }
+    }
+
+    pub fn subscription(&self) -> Subscription<Message> {
+        if self.backup_running {
+            iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::BackupTick)
+        } else {
+            Subscription::none()
         }
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        // If on repo selector, show that
+        if matches!(self.screen, Screen::RepoSelector) {
+            return self.wrap_with_status(crate::ui::screen_repos::view_selector(self));
+        }
+
         // If password not unlocked and repo exists, show password prompt
-        if !self.password_unlocked && !matches!(self.screen, Screen::FirstRun) {
+        if !self.current_unlocked() && !matches!(self.screen, Screen::FirstRun) {
             return self.view_password_prompt();
         }
 
@@ -800,10 +1064,37 @@ impl App {
             Screen::Backup => crate::ui::screen_backup::view(self),
             Screen::Snapshots => crate::ui::screen_snapshots::view(self),
             Screen::Settings => crate::ui::screen_settings::view(self),
+            Screen::RepoSelector => unreachable!(),
         };
 
-        // Wrap with status bar at bottom
+        self.wrap_with_status(content)
+    }
+
+    fn wrap_with_status<'a>(&'a self, content: Element<'a, Message>) -> Element<'a, Message> {
         let mut main = column![content].spacing(0).width(Length::Fill);
+
+        if let Some(ref info) = self.update_info {
+            let update_bar = container(
+                row![
+                    text(format!(
+                        "A new version is available: v{} (current: v{})",
+                        info.latest, info.current
+                    ))
+                    .size(13),
+                    iced::widget::space::horizontal(),
+                    button(text("Dismiss").size(12))
+                        .on_press(Message::DismissUpdate)
+                        .style(button::text),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            )
+            .padding(8)
+            .width(Length::Fill)
+            .style(container::rounded_box);
+
+            main = main.push(update_bar);
+        }
 
         if !self.status.is_empty() {
             let status_bar = container(
@@ -831,10 +1122,11 @@ impl App {
     }
 
     fn view_password_prompt(&self) -> Element<'_, Message> {
+        let current_pw = self.current_password();
         let content = column![
             text("Rustic Vault").size(28),
             text("Enter your repository password to continue.").size(14),
-            iced::widget::text_input("Password...", &self.password)
+            iced::widget::text_input("Password...", &current_pw)
                 .on_input(Message::PasswordPromptChanged)
                 .on_submit(Message::PasswordPromptSubmit)
                 .secure(true)
@@ -854,7 +1146,7 @@ impl App {
     fn load_snapshots(&mut self) -> Task<Message> {
         self.snapshots_loading = true;
         let repo_path = self.repo_path();
-        let password = self.password.clone();
+        let password = self.current_password();
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {

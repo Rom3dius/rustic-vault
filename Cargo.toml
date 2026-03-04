@@ -19,3 +19,17 @@ rand = "0.9"
 jiff = "0.2"
 log = "0.4"
 hostname = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+semver = "1"
+
+[package.metadata.appimage]
+auto_link = true
+auto_link_exclude_list = [
+    "libc.so*",
+    "libdl.so*",
+    "libpthread.so*",
+    "libm.so*",
+    "librt.so*",
+    "libgcc_s.so*",
+    "ld-linux*.so*",
+]

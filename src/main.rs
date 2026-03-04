@@ -30,6 +30,7 @@ fn main() -> iced::Result {
         app::App::update,
         app::App::view,
     )
+    .subscription(app::App::subscription)
     .theme(app::App::theme)
     .window_size(Size::new(1000.0, 700.0))
     .run()

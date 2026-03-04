@@ -129,9 +129,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
 
     // Nav bar at top
+    let repo_label = app
+        .config
+        .current_repo_config()
+        .map(|r| format!("Rustic Vault  /  {}", r.name))
+        .unwrap_or_else(|| "Rustic Vault".to_string());
+
     let nav = row![
-        text("Rustic Vault").size(22),
+        text(repo_label).size(22),
         space::horizontal(),
+        button(text("Repositories").size(14)).on_press(Message::GoRepoSelector),
         button(text("Snapshots").size(14)).on_press(Message::GoSnapshots),
         button(text("Settings").size(14)).on_press(Message::GoSettings),
     ]

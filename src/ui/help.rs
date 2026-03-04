@@ -21,12 +21,11 @@ pub const KEEP_MONTHLY: &str = "Keep one snapshot per month for the last N month
 within each month are removed.";
 
 pub const REPO_PASSWORD: &str = "This password encrypts your backup data inside the repository. \
-Even though your drive is already encrypted with VeraCrypt, the repository has its own encryption \
-layer — this means your backups stay protected even if you copy the repo folder elsewhere.";
+The repository has its own encryption layer — your backups stay protected even if the repository \
+folder is copied or moved elsewhere.";
 
-pub const SAVE_PASSWORD: &str = "Store the password in a file on this drive so you don't have to \
-type it each time. Since this drive is already VeraCrypt-encrypted, the password file is protected \
-at rest. Disable this if you share the unlocked drive with others.";
+pub const SAVE_PASSWORD: &str = "The password file is stored unencrypted on disk — only enable \
+this if the storage location is already protected (e.g., encrypted volume, private machine).";
 
 pub const PROFILE: &str = "A profile defines what to back up: which folders, what to exclude, and \
 how long to keep old snapshots. Create one profile per device or per use case.";
@@ -45,7 +44,7 @@ not modify the repository — you can restore the same snapshot multiple times."
 
 pub const WELCOME: &str = "Welcome to Rustic Vault! This tool helps you create encrypted, \
 deduplicated backups of your files. Your backups are stored in a restic-compatible repository \
-on this encrypted drive.";
+at a location you choose.";
 
 pub const RUN_BACKUP_TOOLTIP: &str = "Create a new snapshot from this profile's folders";
 
