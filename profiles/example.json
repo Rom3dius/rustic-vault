@@ -1,0 +1,14 @@
+{
+  "id": "00000000-0000-0000-0000-000000000001",
+  "name": "Example Profile",
+  "paths": [],
+  "excludes": ["node_modules", ".cache", "__pycache__", "*.tmp", ".git"],
+  "tags": ["example"],
+  "retention": {
+    "keep_last": 5,
+    "keep_daily": 7,
+    "keep_weekly": 4,
+    "keep_monthly": 12
+  },
+  "last_backup": null
+}

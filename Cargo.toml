@@ -1,0 +1,21 @@
+[package]
+name = "rustic-vault"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+iced = { version = "0.14", features = ["tokio", "svg", "lazy", "advanced"] }
+rustic_core = "0.10"
+rustic_backend = "0.6"
+tokio = { version = "1", features = ["full"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+bytesize = "2"
+rand = "0.9"
+jiff = "0.2"
+log = "0.4"
+hostname = "0.4"
